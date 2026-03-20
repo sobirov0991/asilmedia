@@ -1,133 +1,106 @@
 (function () {
-    'use strict';
+  'use strict';
 
-    const BASE = 'http://asilmedia.org';
+  var PLUGIN_NAME = 'uzmovi';
+  var BASE_URL = 'https://uzmovi.tv';
 
-    function parseItems(html) {
-        let parser = new DOMParser();
-        let doc = parser.parseFromString(html, 'text/html');
-
-        let items = [];
-
-        doc.querySelectorAll('.short').forEach(el => {
-            let title = el.querySelector('.short-title')?.innerText || 'No title';
-            let link = el.querySelector('a')?.href || '';
-            let img = el.querySelector('img')?.src || '';
-
-            items.push({
-                title: title,
-                poster: img,
-                url: link,
-                type: 'movie'
-            });
-        });
-
-        return items;
+  // HTML dan kino kartalarini parse qilish
+  function parseMovies(html) {
+    var movies = [];
+    // Kino kartalarini topish
+    var regex = /<a href="(https:\/\/uzmovi\.tv\/[^"]+\.html)"[^>]*title="([^"]+)"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"[^>]*>/g;
+    var match;
+    while ((match = regex.exec(html)) !== null) {
+      var url = match[1];
+      var title = match[2];
+      var poster = match[3];
+      // Duplikatlarni oldini olish
+      if (!movies.find(function(m){ return m.url === url; })) {
+        movies.push({ url: url, title: title, poster: poster });
+      }
     }
+    return movies;
+  }
 
-    function loadPage(url, callback) {
-        fetch(url)
-            .then(res => res.text())
-            .then(html => callback(parseItems(html)))
-            .catch(() => callback([]));
-    }
-
-    function search(query, page, callback) {
-        let url = `${BASE}/index.php?do=search&subaction=search&story=${encodeURIComponent(query)}&page=${page}`;
-        loadPage(url, callback);
-    }
-
-    function category(type, page, callback) {
-        let url = '';
-
-        if (type === 'movies') {
-            url = `${BASE}/films/tarjima_kinolar/page/${page}/`;
-        } else if (type === 'serials') {
-            url = `${BASE}/serials/page/${page}/`;
-        }
-
-        loadPage(url, callback);
-    }
-
-    function extractVideos(html) {
-        let parser = new DOMParser();
-        let doc = parser.parseFromString(html, 'text/html');
-
-        let results = [];
-
-        // iframe player
-        doc.querySelectorAll('iframe').forEach((frame, i) => {
-            if (frame.src) {
-                results.push({
-                    title: 'Player ' + (i + 1),
-                    url: frame.src,
-                    quality: 'auto'
-                });
-            }
-        });
-
-        // video sources (agar bor bo‘lsa)
-        doc.querySelectorAll('source').forEach((src, i) => {
-            if (src.src) {
-                results.push({
-                    title: 'Source ' + (i + 1),
-                    url: src.src,
-                    quality: src.getAttribute('label') || 'HD'
-                });
-            }
-        });
-
-        return results;
-    }
-
-    function getVideos(url, callback) {
-        fetch(url)
-            .then(res => res.text())
-            .then(html => {
-                let videos = extractVideos(html);
-                callback(videos);
-            })
-            .catch(() => callback([]));
-    }
-
-    Lampa.Plugin.add('asilmedia_pro', {
-        title: 'AsilMedia PRO',
-        version: '2.0.0',
-
-        // 🔍 SEARCH
-        onSearch: function (query, page, callback) {
-            search(query, page || 1, callback);
-        },
-
-        // 📂 CATEGORY
-        onCategory: function (params, callback) {
-            let page = params.page || 1;
-
-            if (params.url === 'movies') {
-                category('movies', page, callback);
-            } else if (params.url === 'serials') {
-                category('serials', page, callback);
-            }
-        },
-
-        // 📺 ITEM → PLAYER
-        onItem: function (item, callback) {
-            getVideos(item.url, callback);
-        },
-
-        // 📁 MENU
-        onMenu: function (callback) {
-            callback([
-                {
-                    title: 'Tarjima kinolar',
-                    url: 'movies'
-                },
-                {
-                    title: 'Seriallar',
-                    url: 'serials'
-                }
-            ]);
-        }
+  // Kino sahifasidan iframe/video URL olish
+  function getVideoUrl(pageUrl, callback) {
+    Lampa.Ajax.get(pageUrl, function(html) {
+      // iframe src ni topish
+      var iframeMatch = html.match(/iframe[^>]+src=["']([^"']+)["']/);
+      if (iframeMatch) {
+        callback(iframeMatch[1]);
+      } else {
+        callback(null);
+      }
+    }, function() {
+      callback(null);
     });
+  }
+
+  // Kinolar ro'yxatini ko'rsatish
+  function showMovieList(page) {
+    page = page || 1;
+    var url = BASE_URL + '/lastnews/page/' + page;
+
+    Lampa.Ajax.get(url, function(html) {
+      var movies = parseMovies(html);
+
+      var items = movies.map(function(movie) {
+        return {
+          title: movie.title,
+          poster: movie.poster,
+          type: 'movie',
+          source: PLUGIN_NAME,
+          _uzmovi_url: movie.url
+        };
+      });
+
+      Lampa.Activity.push({
+        title: 'UZMovi - Premyeralar (Bet ' + page + ')',
+        component: 'card',
+        source: PLUGIN_NAME,
+        items: items,
+        page: page,
+        onscroll: function() {
+          showMovieList(page + 1);
+        }
+      });
+
+    }, function() {
+      Lampa.Noty.show('UZMovi: Ma\'lumot yuklanmadi!');
+    });
+  }
+
+  // Kino ochish
+  Lampa.Listener.follow('full', function(e) {
+    if (e.data && e.data.source === PLUGIN_NAME && e.data._uzmovi_url) {
+      getVideoUrl(e.data._uzmovi_url, function(videoUrl) {
+        if (videoUrl) {
+          Lampa.Player.play({
+            url: videoUrl,
+            title: e.data.title
+          });
+        } else {
+          Lampa.Noty.show('Video topilmadi!');
+        }
+      });
+    }
+  });
+
+  // Menyu qo'shish
+  Lampa.Plugin.add({
+    name: PLUGIN_NAME,
+    type: 'other',
+    component: 'menu',
+    onstart: function() {
+      Lampa.Menu.add({
+        title: 'UZMovi Premyeralar',
+        icon: 'icon-play',
+        action: function() {
+          showMovieList(1);
+        }
+      });
+    }
+  });
 
 })();
